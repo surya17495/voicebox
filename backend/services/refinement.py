@@ -8,6 +8,7 @@ rather than a raw prompt editor. Adding a new refinement behaviour is a matter
 of appending one helper below and wiring one toggle on the frontend.
 """
 
+import asyncio
 import re
 from dataclasses import dataclass
 
@@ -284,6 +285,19 @@ async def refine_transcript(
     cleaned_input = collapse_repetitive_artifacts(transcript)
 
     system_prompt = build_refinement_prompt(flags)
+
+    # fork patch (gemini-stt): refinement via gemini-3.5-flash (separate bucket);
+    # Gemini STT smart mode already resolves self-corrections, so this pass is
+    # a light polish honoring the same flags.
+    try:
+        from .gemini_stt import enabled as gemini_enabled, gemini_refine_text
+
+        if gemini_enabled():
+            text = await asyncio.to_thread(gemini_refine_text, system_prompt, cleaned_input)
+            return text.strip(), "gemini-3.5-flash"
+    except RuntimeError:
+        pass  # fall through to the local LLM if Gemini is unusable
+
     text = await backend.generate(
         prompt=cleaned_input,
         system=system_prompt,

@@ -12,6 +12,7 @@ from ..backends.base import is_model_cached
 from ..database import Capture as DBCapture, get_db
 from ..services import captures as captures_service
 from ..services import settings as settings_service
+from ..services.gemini_stt import enabled as gemini_enabled
 from ..services.refinement import RefinementFlags
 
 logger = logging.getLogger(__name__)
@@ -184,18 +185,18 @@ async def capture_readiness_endpoint(db: Session = Depends(get_db)):
 
     return models.CaptureReadinessResponse(
         stt=models.ModelReadiness(
-            ready=is_model_cached(stt_cfg.hf_repo_id),
-            model_name=stt_cfg.model_name,
-            display_name=stt_cfg.display_name,
+            ready=True if gemini_enabled() else is_model_cached(stt_cfg.hf_repo_id),
+            model_name="gemini-3.5-transcribe" if gemini_enabled() else stt_cfg.model_name,
+            display_name="Gemini Transcribe" if gemini_enabled() else stt_cfg.display_name,
             size=stt_cfg.model_size,
-            size_mb=stt_cfg.size_mb or None,
+            size_mb=None if gemini_enabled() else (stt_cfg.size_mb or None),
         ),
         llm=models.ModelReadiness(
-            ready=is_model_cached(llm_cfg.hf_repo_id),
-            model_name=llm_cfg.model_name,
-            display_name=llm_cfg.display_name,
+            ready=True if gemini_enabled() else is_model_cached(llm_cfg.hf_repo_id),
+            model_name="gemini-3.5-flash" if gemini_enabled() else llm_cfg.model_name,
+            display_name="Gemini Flash (refine)" if gemini_enabled() else llm_cfg.display_name,
             size=llm_cfg.model_size,
-            size_mb=llm_cfg.size_mb or None,
+            size_mb=None if gemini_enabled() else (llm_cfg.size_mb or None),
         ),
     )
 

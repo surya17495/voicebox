@@ -39,6 +39,45 @@ def _cfg_keys():
     return keys
 
 
+def enabled() -> bool:
+    """True when at least one Gemini key is configured (STT/refine routed here)."""
+    return bool(_cfg_keys())
+
+
+def gemini_refine_text(system_prompt: str, user_text: str) -> str:
+    """Refinement via gemini-3.5-flash (separate free-tier bucket from STT)."""
+    keys = _cfg_keys()
+    if not keys:
+        raise RuntimeError("GEMINI_API_KEY not configured")
+    last = ""
+    for i in range(len(keys)):
+        key = keys[(i + _state["cur"]) % len(keys)]
+        try:
+            r = requests.post(
+                f"{_GB}/v1beta/models/gemini-3.5-flash:generateContent",
+                headers={"x-goog-api-key": key},
+                json={"contents": [
+                    {"role": "user", "parts": [
+                        {"text": f"{system_prompt}\n\nTranscript:\n{user_text}"},
+                    ]},
+                ]},
+                timeout=40,
+            )
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            if r.status_code == 429:
+                import re
+                m = re.search(r"retry in ([0-9.]+)s", r.text)
+                _state["cap"][i] = _time.time() + (float(m.group(1)) if m else 45.0)
+                last = f"key#{i+1} 429"
+            else:
+                _state["cap"][i] = _time.time() + _KEY_INVALID_CAP_S
+                last = f"key#{i+1} {r.status_code}: {r.text[:90]}"
+        except requests.RequestException as e:
+            last = f"key#{i+1} {str(e)[:90]}"
+    raise RuntimeError(f"refine failed: {last}")
+
+
 def _pick_key():
     now = _time.time()
     for i in range(len(_state["keys"])):
