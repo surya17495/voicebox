@@ -7,6 +7,7 @@ uploaded file). Storage mirrors the generations flow: audio lives under
 ``data/captures/<id>.wav`` and rows live in the ``captures`` table.
 """
 
+import asyncio
 import contextlib
 import json
 import logging
