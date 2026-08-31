@@ -11,6 +11,7 @@ service deliberately uses ONE batch call per utterance (no client-side
 streaming) - the Voicebox frontend posts the whole recording here.
 """
 
+import base64
 import json
 import time as _time
 from pathlib import Path
@@ -92,7 +93,13 @@ def _pick_key():
 
 def gemini_transcribe_file(path: str, language: str | None = None,
                            smart: bool = True, diarize: bool = False) -> tuple[str, str]:
-    """Returns (text, provider_tag). Raises RuntimeError with a readable message."""
+    """Returns (text, provider_tag). Raises RuntimeError with a readable message.
+
+    Speed (measured 2026-08-31): inline base64 audio in ONE interactions request
+    (~2.2s total) beats multipart-upload-then-transcribe (~2.5s, two round trips,
+    plus file-ACTIVE risk). Inline used for files < 8MB; multipart stays as the
+    large-file fallback.
+    """
     import re
     keys = _cfg_keys()
     _state["keys"] = keys
@@ -103,6 +110,8 @@ def gemini_transcribe_file(path: str, language: str | None = None,
     attempts = 0
     retry_same = False
     max_attempts = max(3, len(keys) * 2)
+    inline = len(data) <= 8 * 1024 * 1024
+    inline_b64 = base64.b64encode(data).decode() if inline else ""
     while attempts < max_attempts:
         idx, wait = _pick_key()
         if wait > 0:
@@ -110,53 +119,62 @@ def gemini_transcribe_file(path: str, language: str | None = None,
         key = keys[idx]
         headers = {"x-goog-api-key": key}
         try:
-            up = requests.post(
-                f"{_GB}/upload/v1beta/files", params={"key": key, "uploadType": "multipart"},
-                headers=headers,
-                files={"file": ("audio.wav", data, "audio/wav")},
-                data={"request": json.dumps({"file": {"display_name": "voicebox"}})}, timeout=30)
-            if up.status_code != 200 or "file" not in up.json():
-                last_err = f"upload {up.status_code}: {up.text[:100]}"
-                _state["cap"][idx] = _time.time() + 30
+            if smart and not diarize:
+                tconf = {"mode": "smart"}
+            elif diarize:
+                tconf = {"mode": {"type": "verbatim", "diarization_mode": "speaker"}}
             else:
+                tconf = {"mode": "verbatim"}
+            tconf["language_codes"] = [(language or "en-US").replace("_", "-")]
+
+            if inline:
+                r = requests.post(f"{_GB}/v1beta/interactions", headers=headers, timeout=60,
+                    json={"model": "gemini-3.5-transcribe",
+                          "input": [{"type": "audio", "data": inline_b64, "mime_type": "audio/wav"}],
+                          "generation_config": {"transcription_config": tconf}})
+            else:
+                up = requests.post(
+                    f"{_GB}/upload/v1beta/files", params={"key": key, "uploadType": "multipart"},
+                    headers=headers,
+                    files={"file": ("audio.wav", data, "audio/wav")},
+                    data={"request": json.dumps({"file": {"display_name": "voicebox"}})}, timeout=30)
+                if up.status_code != 200 or "file" not in up.json():
+                    last_err = f"upload {up.status_code}: {up.text[:100]}"
+                    _state["cap"][idx] = _time.time() + 30
+                    attempts += 1
+                    continue
                 fj = up.json()["file"]
-                if smart and not diarize:
-                    tconf = {"mode": "smart"}
-                elif diarize:
-                    tconf = {"mode": {"type": "verbatim", "diarization_mode": "speaker"}}
-                else:
-                    tconf = {"mode": "verbatim"}
-                tconf["language_codes"] = [(language or "en-US").replace("_", "-")]
                 r = requests.post(f"{_GB}/v1beta/interactions", headers=headers, timeout=60,
                     json={"model": "gemini-3.5-transcribe",
                           "input": [{"type": "audio", "uri": fj["uri"], "mime_type": fj.get("mimeType", "audio/wav")}],
                           "generation_config": {"transcription_config": tconf}})
-                if r.status_code == 200:
-                    texts = []
-                    for st in r.json().get("steps", []):
-                        if st.get("type") == "model_output":
-                            for p in st.get("content", []):
-                                if p.get("type") == "text" and p.get("text"):
-                                    texts.append(p["text"])
-                    text = " ".join(texts).strip()
-                    if text:
-                        return text, f"gemini(key#{idx+1})"
-                    # 200-with-empty-output is transient (seen on garbage/silent
-                    # audio); retry same key - a hard error here wedges the app's
-                    # pill state machine, so never 500 faster than we must.
-                    last_err = "200 with empty output"
-                    retry_same = True
-                    _time.sleep(1.5)
-                    attempts += 1
-                    continue
-                elif r.status_code == 429:
-                    m = re.search(r"retry in ([0-9.]+)s", r.text)
-                    cd = float(m.group(1)) if m else 45.0
-                    _state["cap"][idx] = _time.time() + max(cd, 3.0)
-                    last_err = f"key#{idx+1} quota window ({cd:.0f}s)"
-                else:
-                    _state["cap"][idx] = _time.time() + _KEY_INVALID_CAP_S
-                    last_err = f"key#{idx+1} {r.status_code}: {r.text[:100]}"
+
+            if r.status_code == 200:
+                texts = []
+                for st in r.json().get("steps", []):
+                    if st.get("type") == "model_output":
+                        for p in st.get("content", []):
+                            if p.get("type") == "text" and p.get("text"):
+                                texts.append(p["text"])
+                text = " ".join(texts).strip()
+                if text:
+                    return text, f"gemini(key#{idx+1})"
+                # 200-with-empty-output is transient (seen on garbage/silent
+                # audio); retry same key - a hard error here wedges the app's
+                # pill state machine, so never 500 faster than we must.
+                last_err = "200 with empty output"
+                retry_same = True
+                _time.sleep(1.5)
+                attempts += 1
+                continue
+            elif r.status_code == 429:
+                m = re.search(r"retry in ([0-9.]+)s", r.text)
+                cd = float(m.group(1)) if m else 45.0
+                _state["cap"][idx] = _time.time() + max(cd, 3.0)
+                last_err = f"key#{idx+1} quota window ({cd:.0f}s)"
+            else:
+                _state["cap"][idx] = _time.time() + _KEY_INVALID_CAP_S
+                last_err = f"key#{idx+1} {r.status_code}: {r.text[:100]}"
         except requests.RequestException as e:
             last_err = f"key#{idx+1} network: {str(e)[:90]}"
             _state["cap"][idx] = _time.time() + 20

@@ -89,36 +89,51 @@ async def create_capture(
         # via ffmpeg, which miniaudio (used inside mlx-audio's whisper) can't.
         # The decoded array gives us an accurate duration and becomes the
         # canonical WAV we hand to whisper.
-        try:
-            audio, sr = load_audio(str(raw_path))
-            duration_ms = int((len(audio) / sr) * 1000) if sr else None
-        except Exception as decode_err:
-            logger.warning(
-                "Could not decode capture %s (%s): %r", capture_id, suffix, decode_err
-            )
-            audio, sr = None, None
-            duration_ms = None
+        # fork patch (gemini-stt): WAV captures skip the librosa decode entirely -
+        # Gemini consumes the raw bytes, and duration comes from the WAV header.
+        # librosa decode was costing ~0.5-1s of per-request latency (measured).
+        raw_duration_ms = None
+        if suffix in (".wav",):
+            try:
+                import wave as _wf
 
-        if audio is None or sr is None:
-            # Decode failed. Only pass the file straight to whisper if the
-            # source is a format its miniaudio loader can still read — webm,
-            # m4a, etc. would just 500 later. Surface a clean error instead.
-            if suffix not in WHISPER_NATIVE_FORMATS:
-                raise ValueError(
-                    f"Could not decode {suffix} audio — the recording may be empty or corrupt"
-                )
-            audio_path = raw_path
-        elif suffix == ".wav":
+                with _wf.open(str(raw_path), "rb") as wf:
+                    raw_duration_ms = int((wf.getnframes() / float(wf.getframerate() or 1)) * 1000)
+            except Exception as dur_err:
+                logger.warning("WAV header read failed for %s: %r", capture_id, dur_err)
+            audio = None
+            sr = None
+            duration_ms = raw_duration_ms if raw_duration_ms is not None else None
             audio_path = raw_path
         else:
-            # Transcode to WAV so downstream loaders (miniaudio, soundfile) work
-            # regardless of what format the client shipped.
-            audio_path = config.get_captures_dir() / f"{capture_id}.wav"
-            sf.write(str(audio_path), audio, sr, format="WAV")
-            written_files.append(audio_path)
-            with contextlib.suppress(OSError):
-                raw_path.unlink()
-                written_files.remove(raw_path)
+            try:
+                audio, sr = load_audio(str(raw_path))
+                duration_ms = int((len(audio) / sr) * 1000) if sr else None
+            except Exception as decode_err:
+                logger.warning(
+                    "Could not decode capture %s (%s): %r", capture_id, suffix, decode_err
+                )
+                audio, sr = None, None
+                duration_ms = None
+
+            if audio is None or sr is None:
+                # Decode failed. Only pass the file straight to whisper if the
+                # source is a format its miniaudio loader can still read - webm,
+                # m4a, etc. would just 500 later. Surface a clean error instead.
+                if suffix not in WHISPER_NATIVE_FORMATS:
+                    raise ValueError(
+                        f"Could not decode {suffix} audio — the recording may be empty or corrupt"
+                    )
+                audio_path = raw_path
+            else:
+                # Transcode to WAV so downstream loaders (miniaudio, soundfile) work
+                # regardless of what format the client shipped.
+                audio_path = config.get_captures_dir() / f"{capture_id}.wav"
+                sf.write(str(audio_path), audio, sr, format="WAV")
+                written_files.append(audio_path)
+                with contextlib.suppress(OSError):
+                    raw_path.unlink()
+                    written_files.remove(raw_path)
 
         # fork patch (gemini-stt): Gemini provider replaces whisper when a key is set.
         resolved_stt = stt_model or "smart"
