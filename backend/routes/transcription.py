@@ -26,7 +26,13 @@ async def transcribe_audio(
     language: str | None = Form(None),
     model: str | None = Form(None),
 ):
-    """Transcribe audio file to text."""
+    """Transcribe audio file to text.
+
+    Fork patch (gemini-stt branch, 2026-08-30): when GEMINI_API_KEY is set,
+    transcribe via Google's gemini-3.5-transcribe (multipart upload +
+    interactions; key-chain + quota pacing in services.gemini_stt). Falls back
+    to local Whisper when no key is configured, preserving upstream behavior.
+    """
     uploaded_ext = Path(file.filename or "").suffix.lower()
     file_suffix = uploaded_ext if uploaded_ext in ALLOWED_AUDIO_EXTS else ".wav"
 
@@ -34,6 +40,32 @@ async def transcribe_audio(
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             tmp.write(chunk)
         tmp_path = tmp.name
+
+    from .. import config as _cfg  # noqa: PLC0415 - runtime env lookup
+    if getattr(_cfg, "GEMINI_API_KEY", None) or __import__("os").environ.get("GEMINI_API_KEY"):
+        from ..services.gemini_stt import gemini_transcribe_file  # noqa: PLC0415
+
+        smart_mode = (model or "smart").lower() != "verbatim"
+        try:
+            # wav keeps its real duration; containers get best-effort 0.0
+            duration = 0.0
+            if file_suffix == ".wav":
+                import wave as _wave  # noqa: PLC0415
+
+                try:
+                    with _wave.open(tmp_path, "rb") as w:
+                        duration = w.getnframes() / float(w.getframerate() or 1)
+                except Exception:
+                    duration = 0.0
+            text, tag = await asyncio.to_thread(
+                gemini_transcribe_file, tmp_path, language, smart_mode, False)
+            return models.TranscriptionResponse(text=text, duration=duration)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Gemini STT: {e}")
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
 
     stt_path = tmp_path
     try:

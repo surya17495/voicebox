@@ -157,3 +157,6 @@ def get_cloud_web_url() -> str:
 def get_cloud_api_url() -> str:
     """Base URL of the Voicebox Cloud API (bearer-authenticated sync/account)."""
     return os.environ.get("VOICEBOX_CLOUD_API_URL", "https://api.voicebox.sh").rstrip("/")
+
+# --- fork patch (gemini-stt branch): Gemini provider flag, read at request time ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
