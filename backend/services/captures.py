@@ -24,6 +24,7 @@ from ..models import CaptureResponse, RefinementFlagsModel
 from ..utils.audio import load_audio
 from .refinement import RefinementFlags, refine_transcript
 from . import gemini_stt as gemini
+from . import nebius_rewrite as nebius
 from .gemini_stt import gemini_transcribe_file
 from .transcribe import get_whisper_model
 
@@ -232,6 +233,21 @@ async def refine_capture(
     # through instantly; no refine call, no extra quota.
     if gemini.enabled() and (row.stt_model or "").startswith("gemini") \
             and row.transcript_raw and row.transcript_refined is None:
+        # fork patch (nebius-rewrite): LONG recordings get a layout pass through
+        # Nebius (paid, quota-free) - paragraphs/bullets without touching words.
+        # Short ones stay instant pass-through.
+        dur_s = (row.duration_ms or 0) / 1000.0
+        if nebius.configured() and dur_s >= nebius.min_sec():
+            try:
+                structured = await asyncio.to_thread(nebius.rewrite, row.transcript_raw)
+                row.transcript_refined = structured
+                row.llm_model = f"nebius/{nebius.model_name()}"
+                row.refinement_flags = json.dumps(flags.to_dict())
+                db.commit()
+                db.refresh(row)
+                return _to_response(row)
+            except Exception as ne:
+                logger.warning("Nebius rewrite failed (%s) - passing through unchanged", ne)
         row.transcript_refined = row.transcript_raw
         row.llm_model = "passthrough (cleaned at STT)"
         row.refinement_flags = json.dumps(flags.to_dict())
