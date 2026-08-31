@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+requests
+sqlalchemy
+numpy
+soundfile
+fastmcp
+librosa
+pillow
+pydantic-settings
+aiohttp
+pedalboard
+huggingface_hub
+torch --index-url https://download.pytorch.org/whl/cpu
