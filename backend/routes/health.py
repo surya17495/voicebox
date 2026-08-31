@@ -127,6 +127,11 @@ async def health():
 
     model_loaded = False
     model_size = None
+    # fork patch (gemini-stt): when Gemini transcription is configured, the app's
+    # remote STT "model" is always available - report ready so the UI says Model Ready.
+    if config.GEMINI_API_KEY:
+        model_loaded = True
+        model_size = "gemini-3.5-transcribe"
     try:
         if tts_model.is_loaded():
             model_loaded = True
