@@ -101,7 +101,9 @@ def gemini_transcribe_file(path: str, language: str | None = None,
     data = Path(path).read_bytes()
     last_err = ""
     attempts = 0
-    while attempts < max(1, len(keys)):
+    retry_same = False
+    max_attempts = max(3, len(keys) * 2)
+    while attempts < max_attempts:
         idx, wait = _pick_key()
         if wait > 0:
             raise RuntimeError(f"all {len(keys)} keys on quota - soonest unlock in {int(wait)}s")
@@ -139,7 +141,14 @@ def gemini_transcribe_file(path: str, language: str | None = None,
                     text = " ".join(texts).strip()
                     if text:
                         return text, f"gemini(key#{idx+1})"
+                    # 200-with-empty-output is transient (seen on garbage/silent
+                    # audio); retry same key - a hard error here wedges the app's
+                    # pill state machine, so never 500 faster than we must.
                     last_err = "200 with empty output"
+                    retry_same = True
+                    _time.sleep(1.5)
+                    attempts += 1
+                    continue
                 elif r.status_code == 429:
                     m = re.search(r"retry in ([0-9.]+)s", r.text)
                     cd = float(m.group(1)) if m else 45.0
@@ -152,5 +161,8 @@ def gemini_transcribe_file(path: str, language: str | None = None,
             last_err = f"key#{idx+1} network: {str(e)[:90]}"
             _state["cap"][idx] = _time.time() + 20
         attempts += 1
-        _state["cur"] = (idx + 1) % max(1, len(keys))
+        if retry_same:
+            retry_same = False          # same key: empty-200 is transient, not key health
+        else:
+            _state["cur"] = (idx + 1) % max(1, len(keys))
     raise RuntimeError(last_err or "all Gemini keys exhausted")

@@ -123,10 +123,19 @@ async def create_capture(
         # fork patch (gemini-stt): Gemini provider replaces whisper when a key is set.
         resolved_stt = stt_model or "smart"
         if gemini.enabled():
-            transcript, _tag = await asyncio.to_thread(
-                gemini_transcribe_file, str(audio_path), language, (stt_model or "smart") != "verbatim", False
-            )
-            resolved_stt = "gemini-3.5-transcribe"
+            try:
+                transcript, _tag = await asyncio.to_thread(
+                    gemini_transcribe_file, str(audio_path), language, (stt_model or "smart") != "verbatim", False
+                )
+                resolved_stt = "gemini-3.5-transcribe"
+            except Exception as ge:
+                # NEVER 500 the pill's request - the app's recording state machine
+                # has no recovery path for a failed POST and the pill wedges on
+                # "recording" forever. Ship a readable placeholder so the flow
+                # always completes and the user can just press again.
+                transcript = f"[transcription failed - press the hotkey again] ({str(ge)[:60]})"
+                resolved_stt = "gemini-error"
+                logger.warning("Gemini STT failed, soft-failing: %s", ge)
         else:
             whisper = get_whisper_model()
             resolved_stt = stt_model or whisper.model_size
