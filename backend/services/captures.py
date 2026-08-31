@@ -202,6 +202,19 @@ async def refine_capture(
     if not row:
         return None
 
+    # fork patch (gemini-stt): smart-mode transcription already performs the
+    # cleanup this pass exists for (fillers, self-corrections, punctuation) - so
+    # a second LLM call on Gemini-produced text is pure redundancy. Pass it
+    # through instantly; no refine call, no extra quota.
+    if gemini.enabled() and (row.stt_model or "").startswith("gemini") \
+            and row.transcript_raw and row.transcript_refined is None:
+        row.transcript_refined = row.transcript_raw
+        row.llm_model = "passthrough (cleaned at STT)"
+        row.refinement_flags = json.dumps(flags.to_dict())
+        db.commit()
+        db.refresh(row)
+        return _to_response(row)
+
     refined, llm_size = await refine_transcript(
         row.transcript_raw or "",
         flags,
