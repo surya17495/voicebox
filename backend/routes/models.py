@@ -399,6 +399,10 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
     if not config:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_name}")
 
+    # fork patch (gemini-stt): cloud model - nothing to download, nothing to load.
+    if not config.hf_repo_id:
+        return {"message": f"{config.display_name} is a cloud model - always available, nothing to download"}
+
     load_func = get_model_load_func(config)
 
     async def download_in_background():

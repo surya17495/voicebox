@@ -375,8 +375,15 @@ def _get_non_qwen_tts_configs() -> list[ModelConfig]:
 
 
 def _get_whisper_configs() -> list[ModelConfig]:
-    """Return Whisper STT model configs."""
-    return [
+    """Return Whisper STT model configs.
+
+    fork patch (gemini-stt): when a Gemini key is configured, prepend the cloud
+    engine so the app's transcription model list shows the engine that will
+    actually run. The Gemini entry has no local download.
+    """
+    import os
+
+    configs = [
         ModelConfig(
             model_name="whisper-base",
             display_name="Whisper Base",
@@ -413,6 +420,18 @@ def _get_whisper_configs() -> list[ModelConfig]:
             model_size="turbo",
         ),
     ]
+    if os.environ.get("GEMINI_API_KEY"):
+        configs.insert(
+            0,
+            ModelConfig(
+                model_name="gemini-transcribe",
+                display_name="Gemini Transcribe (cloud)",
+                engine="gemini",
+                hf_repo_id="",  # cloud model - nothing to download
+                model_size="gemini",
+            ),
+        )
+    return configs
 
 
 def _get_qwen_llm_configs() -> list[ModelConfig]:
